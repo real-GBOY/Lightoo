@@ -1,0 +1,252 @@
+// LIGHTOO schema. Single owner, but every row is owner-scoped so private
+// records can never become public by accident. IDs are prefixed random strings
+// (usr_…, pl_…) generated in src/lib/ids.ts, same convention as Project 404.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL") // pooled connection (serverless runtime)
+  directUrl = env("DIRECT_URL") // direct connection (migrations)
+}
+
+enum ConnectionStatus {
+  ACTIVE
+  EXPIRED // refresh failed / access revoked → user must reconnect
+  DISCONNECTED
+}
+
+enum SyncStatus {
+  IDLE
+  OK
+  FAILED
+  RATE_LIMITED
+  UNREADABLE // private or Spotify-owned playlist the API won't return
+}
+
+enum DiscoveryType {
+  NEW_TRACK // appeared in a monitored playlist after the baseline
+  SEEDED // one of the recent tracks seeded when the playlist was added
+}
+
+enum SyncOutcome {
+  RUNNING
+  SUCCESS
+  NO_CHANGES
+  FAILED
+  RATE_LIMITED
+  UNREADABLE
+}
+
+enum AudioSourceType {
+  LOCAL_FILE // user-imported file, bytes live in the device's IndexedDB
+  REMOTE_URL // authorized streaming/object-storage URL
+}
+
+enum AudioAvailability {
+  METADATA_ONLY
+  AVAILABLE
+  DOWNLOADING
+  FAILED
+}
+
+model User {
+  id           String   @id
+  email        String   @unique
+  settings     Json     @default("{}")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  spotify          SpotifyConnection?
+  playlists        MonitoredPlaylist[]
+  discoveries      DiscoveryEvent[]
+  trackStates      UserTrackState[]
+  playbackHistory  PlaybackHistory[]
+  audioAssets      AudioAsset[]
+}
+
+model SpotifyConnection {
+  id                 String           @id
+  ownerId            String           @unique
+  spotifyUserId      String
+  displayName        String?
+  scopes             String[]
+  status             ConnectionStatus @default(ACTIVE)
+  accessTokenEnc     String // AES-256-GCM, base64url(iv|tag|ciphertext)
+  refreshTokenEnc    String
+  accessTokenExpiresAt DateTime
+  lastError          String?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  owner User @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+}
+
+model MonitoredPlaylist {
+  id               String     @id
+  ownerId          String
+  spotifyPlaylistId String
+  name             String
+  ownerName        String?
+  imageUrl         String?
+  trackCount       Int        @default(0)
+  monitoring       Boolean    @default(true)
+  baselineDone     Boolean    @default(false)
+  seedRecent       Boolean    @default(true)
+  snapshotId       String? // Spotify change marker from last successful sync
+  lastSyncedAt     DateTime?
+  syncStatus       SyncStatus @default(IDLE)
+  syncError        String?
+  createdAt        DateTime   @default(now())
+  updatedAt        DateTime   @updatedAt
+
+  owner       User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  tracks      PlaylistTrack[]
+  discoveries DiscoveryEvent[]
+  syncRuns    SyncRun[]
+
+  @@unique([ownerId, spotifyPlaylistId])
+  @@index([ownerId, monitoring])
+}
+
+model Track {
+  id            String   @id
+  spotifyId     String   @unique
+  title         String
+  artists       Json // [{ id?: string, name: string }]
+  artistNames   String // denormalised for search
+  albumName     String?
+  imageUrl      String?
+  durationMs    Int?
+  isrc          String?
+  isPlayable    Boolean  @default(true) // false when Spotify reports restricted/unavailable
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  playlistTracks PlaylistTrack[]
+  discoveries    DiscoveryEvent[]
+  states         UserTrackState[]
+  playbackHistory PlaybackHistory[]
+  audioAssets    AudioAsset[]
+
+  @@index([artistNames])
+  @@index([title])
+}
+
+model PlaylistTrack {
+  id           String    @id
+  playlistId   String
+  trackId      String
+  position     Int
+  addedAtSource DateTime? // Spotify's added_at when provided; not relied on
+  firstSeenAt  DateTime
+  lastSeenAt   DateTime
+  removedAt    DateTime? // kept, never deleted: history survives removal
+
+  playlist MonitoredPlaylist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+  track    Track             @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@unique([playlistId, trackId])
+  @@index([playlistId, removedAt])
+  @@index([trackId])
+}
+
+model DiscoveryEvent {
+  id            String        @id
+  ownerId       String
+  playlistId    String?
+  trackId       String
+  type          DiscoveryType
+  detectedAt    DateTime // when LIGHTOO first detected it, never "added at"
+  dedupeKey     String // `${playlistId}:${spotifyTrackId}`
+  playlistName  String // snapshot, survives playlist removal
+  snapshotId    String?
+  createdAt     DateTime      @default(now())
+
+  owner    User               @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  playlist MonitoredPlaylist? @relation(fields: [playlistId], references: [id], onDelete: SetNull)
+  track    Track              @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, dedupeKey])
+  @@index([ownerId, detectedAt(sort: Desc), id(sort: Desc)])
+  @@index([playlistId])
+  @@index([trackId])
+}
+
+model UserTrackState {
+  id         String    @id
+  ownerId    String
+  trackId    String
+  heard      Boolean   @default(false)
+  saved      Boolean   @default(false)
+  note       String?
+  heardAt    DateTime?
+  savedAt    DateTime?
+  // Client-supplied mutation times, used for last-writer-wins reconciliation.
+  heardUpdatedAt DateTime?
+  savedUpdatedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  owner User  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  track Track @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, trackId])
+  @@index([ownerId, saved])
+  @@index([ownerId, heard])
+}
+
+model PlaybackHistory {
+  id         String   @id
+  ownerId    String
+  trackId    String
+  startedAt  DateTime
+  playedMs   Int      @default(0)
+  completed  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  owner User  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  track Track @relation(fields: [trackId], references: [id], onDelete: Cascade)
+
+  @@index([ownerId, startedAt(sort: Desc)])
+}
+
+model AudioAsset {
+  id            String            @id
+  ownerId       String
+  trackId       String?
+  sourceType    AudioSourceType
+  storageKey    String? // object key or `idb:<id>`; bytes are never in Postgres
+  title         String?
+  mimeType      String
+  sizeBytes     Int
+  sha256        String?
+  availability  AudioAvailability @default(AVAILABLE)
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  owner User   @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  track Track? @relation(fields: [trackId], references: [id], onDelete: SetNull)
+
+  @@index([ownerId])
+  @@index([trackId])
+}
+
+model SyncRun {
+  id          String      @id
+  playlistId  String
+  startedAt   DateTime
+  finishedAt  DateTime?
+  outcome     SyncOutcome @default(RUNNING)
+  newTracks   Int         @default(0)
+  removedTracks Int       @default(0)
+  attempt     Int         @default(1)
+  errorCode   String?
+  errorMessage String? // sanitized; never contains tokens
+
+  playlist MonitoredPlaylist @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+
+  @@index([playlistId, startedAt(sort: Desc)])
+}
