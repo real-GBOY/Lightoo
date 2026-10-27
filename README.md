@@ -93,7 +93,7 @@ See `.env.example`. Required: `APP_URL`, `DATABASE_URL`, `DIRECT_URL`, `OWNER_EM
 2. Vercel → Storage / Marketplace → add **Neon Postgres**. Set `DATABASE_URL` to the **pooled** URL and `DIRECT_URL` to the **direct** URL.
 3. Create a Spotify app at developer.spotify.com. Add redirect URI `https://<your-domain>/api/spotify/callback`. Copy the Client ID. Add yourself under User Management (Development Mode).
 4. In Vercel → Settings → Environment Variables set everything in `.env.example`. Generate: `SESSION_SECRET` (`openssl rand -base64 48`), `TOKEN_ENCRYPTION_KEY` (`openssl rand -base64 32`), `CRON_SECRET` (≥16 random chars; Vercel sends it as a Bearer token to cron).
-5. Deploy. `vercel.json` runs `prisma migrate deploy` before `next build`, registers the 6-hourly cron, and allows 60 s functions (check your plan's limit; Hobby crons run at most daily, so change the schedule to `0 6 * * *` there).
+5. Deploy. `vercel.json` runs `prisma migrate deploy` before `next build`, registers a daily cron (the free Hobby plan allows at most one run per day), and allows 60 s functions (check your plan's limit; on Hobby the schedule is already daily).
 6. Open the site → sign in → Connect Spotify → add a playlist. On iPhone: Safari → Share → Add to Home Screen.
 7. Verify: `GET /api/health` returns `{"status":"ok"}`.
 
