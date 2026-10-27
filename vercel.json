@@ -1,7 +1,16 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "nextjs",
-  "buildCommand": "prisma migrate deploy && next build",
-  "crons": [{ "path": "/api/cron/sync", "schedule": "0 6 * * *" }],
-  "functions": { "src/app/api/**/*.ts": { "maxDuration": 60 } }
+  "buildCommand": "DIRECT_URL=\"${DIRECT_URL:-$DATABASE_URL_UNPOOLED}\" prisma migrate deploy && next build",
+  "crons": [
+    {
+      "path": "/api/cron/sync",
+      "schedule": "0 6 * * *"
+    }
+  ],
+  "functions": {
+    "src/app/api/**/*.ts": {
+      "maxDuration": 60
+    }
+  }
 }

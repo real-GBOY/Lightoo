@@ -54,7 +54,7 @@ Left behind: NestJS/DI, RLS and tenancy (the single owner is enforced by `ownerI
 ```
 Vercel (Next.js 15, App Router)  ── route handlers = backend ──►  Neon Postgres (Vercel Marketplace)
    PWA: service worker + IndexedDB                  ▲                 Prisma + migrations
-   Vercel Cron (6-hourly) ─► /api/cron/sync ────────┘
+   Vercel Cron (daily, Hobby limit) ─► /api/cron/sync ────────┘
    Spotify Web API (OAuth Authorization Code + PKCE)
 ```
 
@@ -90,7 +90,7 @@ See `.env.example`. Required: `APP_URL`, `DATABASE_URL`, `DIRECT_URL`, `OWNER_EM
 ## Deploy (Vercel + Neon)
 
 1. Push to a Git repo and import it in Vercel (framework: Next.js).
-2. Vercel → Storage / Marketplace → add **Neon Postgres**. Set `DATABASE_URL` to the **pooled** URL and `DIRECT_URL` to the **direct** URL.
+2. Vercel → Storage / Marketplace → add **Neon Postgres** (free plan) and connect it to the project: it injects `DATABASE_URL` (pooled) and `DATABASE_URL_UNPOOLED` (direct). The build uses the latter for migrations when `DIRECT_URL` is not set.
 3. Create a Spotify app at developer.spotify.com. Add redirect URI `https://<your-domain>/api/spotify/callback`. Copy the Client ID. Add yourself under User Management (Development Mode).
 4. In Vercel → Settings → Environment Variables set everything in `.env.example`. Generate: `SESSION_SECRET` (`openssl rand -base64 48`), `TOKEN_ENCRYPTION_KEY` (`openssl rand -base64 32`), `CRON_SECRET` (≥16 random chars; Vercel sends it as a Bearer token to cron).
 5. Deploy. `vercel.json` runs `prisma migrate deploy` before `next build`, registers a daily cron (the free Hobby plan allows at most one run per day), and allows 60 s functions (check your plan's limit; on Hobby the schedule is already daily).
