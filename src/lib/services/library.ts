@@ -73,6 +73,8 @@ export async function listPlaylists(db: Db, ownerId: string, clock: Clock) {
     ownerName: p.ownerName,
     imageUrl: p.imageUrl,
     trackCount: p.trackCount,
+    source: p.source,
+    embedId: embedIdOf(p),
     monitoring: p.monitoring,
     syncStatus: p.syncStatus,
     syncError: p.syncError,
@@ -81,10 +83,29 @@ export async function listPlaylists(db: Db, ownerId: string, clock: Clock) {
   }));
 }
 
-export const playlistPatch = z.object({ monitoring: z.boolean() }).strict();
+export const playlistPatch = z
+  .object({ monitoring: z.boolean().optional(), spotifyLink: z.string().trim().max(300).optional() })
+  .strict()
+  .refine((v) => v.monitoring !== undefined || v.spotifyLink !== undefined, 'Nothing to update.');
+export type PlaylistPatch = z.infer<typeof playlistPatch>;
 
-export async function setMonitoring(db: Db, ownerId: string, id: string, monitoring: boolean) {
-  const r = await db.monitoredPlaylist.updateMany({ where: { id, ownerId }, data: { monitoring } });
+/** The Spotify playlist id that Spotify's embedded player should show: live playlists use their own id; imported ones only if the user linked one. */
+export function embedIdOf(p: { source: string; spotifyPlaylistId: string; embedId: string | null }): string | null {
+  return p.embedId ?? (p.source === 'SPOTIFY_API' ? p.spotifyPlaylistId : null);
+}
+
+export async function updatePlaylist(db: Db, ownerId: string, id: string, patch: PlaylistPatch) {
+  const data: { monitoring?: boolean; embedId?: string | null } = {};
+  if (patch.monitoring !== undefined) data.monitoring = patch.monitoring;
+  if (patch.spotifyLink !== undefined) {
+    if (patch.spotifyLink === '') data.embedId = null; // empty string clears the link
+    else {
+      const parsed = parsePlaylistInput(patch.spotifyLink);
+      if (!parsed.ok) throw ValidationError('playlist.invalid_link', 'That does not look like a Spotify playlist link.');
+      data.embedId = parsed.id;
+    }
+  }
+  const r = await db.monitoredPlaylist.updateMany({ where: { id, ownerId }, data });
   if (!r.count) throw NotFound('playlist.not_found', 'Playlist not found.');
 }
 
@@ -280,4 +301,40 @@ export async function deleteAllData(db: Db, ownerId: string) {
     db.spotifyConnection.deleteMany({ where: { ownerId } }),
     db.track.deleteMany({ where: { discoveries: { none: {} }, playlistTracks: { none: {} }, audioAssets: { none: {} } } }),
   ]);
+}
+
+// ───────────────────────── playlist library (every track, not just discoveries) ─────────────────────────
+
+/** A track is the owner's if it is one of their discoveries or sits in one of their playlists. */
+export async function ownsTrack(db: Db, ownerId: string, trackId: string): Promise<boolean> {
+  const [d, p] = await Promise.all([
+    db.discoveryEvent.findFirst({ where: { ownerId, trackId }, select: { id: true } }),
+    db.playlistTrack.findFirst({ where: { trackId, playlist: { ownerId } }, select: { id: true } }),
+  ]);
+  return !!(d || p);
+}
+
+const LIBRARY_CAP = 5000;
+
+/**
+ * Every track in a playlist in playlist order, in one query plus one for audio. Metadata is small (~100 B/track),
+ * so the whole list is sent at once and cached on the device; filtering and search then work offline.
+ */
+export async function listPlaylistTracks(db: Db, ownerId: string, playlistId: string) {
+  const pl = await db.monitoredPlaylist.findFirst({ where: { id: playlistId, ownerId }, select: { id: true, name: true } });
+  if (!pl) throw NotFound('playlist.not_found', 'Playlist not found.');
+  const rows = await db.playlistTrack.findMany({
+    where: { playlistId: pl.id },
+    orderBy: { position: 'asc' },
+    take: LIBRARY_CAP,
+    select: { removedAt: true, position: true, track: { select: { id: true, spotifyId: true, title: true, artistNames: true, albumName: true, imageUrl: true, durationMs: true } } },
+  });
+  const withAudio = new Set(
+    (await db.audioAsset.findMany({ where: { ownerId, trackId: { in: rows.map((r) => r.track.id) } }, select: { trackId: true } })).map((a) => a.trackId),
+  );
+  return {
+    playlist: { id: pl.id, name: pl.name },
+    total: rows.length,
+    items: rows.map((r) => ({ ...r.track, removed: r.removedAt !== null, audioOnServer: withAudio.has(r.track.id) })),
+  };
 }

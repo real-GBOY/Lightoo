@@ -42,11 +42,23 @@ export async function body<S extends ZodTypeAny>(req: Request, schema: S): Promi
   return schema.parse(json);
 }
 
-/** CSRF defence for cookie-authenticated mutations: browsers send Origin on cross-site writes. */
+/**
+ * CSRF defence for cookie-authenticated mutations: browsers attach Origin to cross-site writes.
+ * The origin must match the host the client actually addressed (Host, or X-Forwarded-Host behind
+ * Vercel's proxy), not req.url, whose host a framework may normalise.
+ */
 export function assertSameOrigin(req: Request) {
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return;
   const origin = req.headers.get('origin');
-  if (origin && new URL(origin).host !== new URL(req.url).host) {
+  if (!origin) return;
+  const allowed = [req.headers.get('x-forwarded-host'), req.headers.get('host'), new URL(req.url).host]
+    .filter((h): h is string => !!h)
+    .map((h) => h.split(',')[0]!.trim());
+  let host: string;
+  try {
+    host = new URL(origin).host;
+  } catch {
     throw new AppError('forbidden', 'csrf.origin', 'Cross-origin request blocked.');
   }
+  if (!allowed.includes(host)) throw new AppError('forbidden', 'csrf.origin', 'Cross-origin request blocked.');
 }

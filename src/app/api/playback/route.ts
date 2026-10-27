@@ -4,6 +4,7 @@ import { newId } from '@/lib/ids';
 import { body, ok, route } from '@/lib/http';
 import { requireOwner } from '@/lib/session';
 import { settingsDefaults } from '@/lib/services/context';
+import { ownsTrack } from '@/lib/services/library';
 
 const schema = z.object({
   trackId: z.string().min(1),
@@ -18,8 +19,7 @@ export const POST = route(async (req) => {
   const b = await body(req, schema);
   const u = await db.user.findUniqueOrThrow({ where: { id: owner }, select: { settings: true } });
   if (!({ ...settingsDefaults, ...(u.settings as object) }).recordPlayback) return ok({ recorded: false });
-  const owned = await db.discoveryEvent.findFirst({ where: { ownerId: owner, trackId: b.trackId }, select: { id: true } });
-  if (!owned) return ok({ recorded: false });
+  if (!(await ownsTrack(db, owner, b.trackId))) return ok({ recorded: false });
   await db.playbackHistory.create({
     data: { id: newId('pbh'), ownerId: owner, trackId: b.trackId, startedAt: new Date(b.startedAt), playedMs: b.playedMs, completed: b.completed },
   });

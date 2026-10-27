@@ -28,7 +28,7 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en" className={`${sans.variable} ${mono.variable}`}>
-      <body>
+      <body suppressHydrationWarning /* browser extensions inject attributes into <body> before React hydrates */>
         {children}
         <RegisterSW />
       </body>

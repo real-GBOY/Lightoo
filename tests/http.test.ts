@@ -43,4 +43,12 @@ describe('CSRF origin check', () => {
     expect(() => assertSameOrigin(req('https://lightoo.app'))).not.toThrow();
     expect(() => assertSameOrigin(req('https://evil.example', 'GET'))).not.toThrow();
   });
+  it('trusts the Host the client addressed even if req.url was normalised', () => {
+    const r = new Request('http://localhost:3000/api/x', { method: 'POST', headers: { origin: 'http://127.0.0.1:3000', host: '127.0.0.1:3000' } });
+    expect(() => assertSameOrigin(r)).not.toThrow();
+    const proxied = new Request('http://internal/api/x', { method: 'POST', headers: { origin: 'https://lightoo.app', 'x-forwarded-host': 'lightoo.app' } });
+    expect(() => assertSameOrigin(proxied)).not.toThrow();
+    const forged = new Request('http://localhost:3000/api/x', { method: 'POST', headers: { origin: 'https://evil.example', host: 'localhost:3000' } });
+    expect(() => assertSameOrigin(forged)).toThrow();
+  });
 });

@@ -2,7 +2,7 @@ import { db } from '@/lib/db';
 import { NotFound } from '@/lib/errors';
 import { body, ok, route } from '@/lib/http';
 import { requireOwner } from '@/lib/session';
-import { playlistPatch, removePlaylist, setMonitoring } from '@/lib/services/library';
+import { embedIdOf, playlistPatch, removePlaylist, updatePlaylist } from '@/lib/services/library';
 
 export const GET = route<{ id: string }>(async (_req, ctx) => {
   const owner = await requireOwner();
@@ -12,14 +12,13 @@ export const GET = route<{ id: string }>(async (_req, ctx) => {
     include: { syncRuns: { orderBy: { startedAt: 'desc' }, take: 5 } },
   });
   if (!p) throw NotFound('playlist.not_found', 'Playlist not found.');
-  const { ownerId: _o, ...safe } = p;
-  return ok(safe);
+  return ok({ ...Object.fromEntries(Object.entries(p).filter(([k]) => k !== 'ownerId')), embedId: embedIdOf(p) }); // never echo ownerId
 });
 
 export const PATCH = route<{ id: string }>(async (req, ctx) => {
   const owner = await requireOwner();
   const { id } = await ctx.params;
-  await setMonitoring(db, owner, id, (await body(req, playlistPatch)).monitoring);
+  await updatePlaylist(db, owner, id, await body(req, playlistPatch));
   return ok({ ok: true });
 });
 

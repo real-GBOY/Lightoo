@@ -1,6 +1,6 @@
 // LIGHTOO schema. Single owner, but every row is owner-scoped so private
 // records can never become public by accident. IDs are prefixed random strings
-// (usr_…, pl_…) generated in src/lib/ids.ts, same convention as Project 404.
+// (usr_â€¦, pl_â€¦) generated in src/lib/ids.ts, same convention as Project 404.
 
 generator client {
   provider = "prisma-client-js"
@@ -14,7 +14,7 @@ datasource db {
 
 enum ConnectionStatus {
   ACTIVE
-  EXPIRED // refresh failed / access revoked → user must reconnect
+  EXPIRED // refresh failed / access revoked â†’ user must reconnect
   DISCONNECTED
 }
 
@@ -24,6 +24,11 @@ enum SyncStatus {
   FAILED
   RATE_LIMITED
   UNREADABLE // private or Spotify-owned playlist the API won't return
+}
+
+enum PlaylistSource {
+  SPOTIFY_API // checked live through the Spotify Web API
+  IMPORT // loaded from a Spotify data-export file; refreshed by re-importing
 }
 
 enum DiscoveryType {
@@ -92,6 +97,8 @@ model MonitoredPlaylist {
   ownerName        String?
   imageUrl         String?
   trackCount       Int        @default(0)
+  source           PlaylistSource @default(SPOTIFY_API)
+  embedId          String? // Spotify playlist id used only to show Spotify's official embedded player (set by the user for imported playlists)
   monitoring       Boolean    @default(true)
   baselineDone     Boolean    @default(false)
   seedRecent       Boolean    @default(true)

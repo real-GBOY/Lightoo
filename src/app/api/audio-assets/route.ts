@@ -4,6 +4,7 @@ import { NotFound } from '@/lib/errors';
 import { newId } from '@/lib/ids';
 import { body, ok, route } from '@/lib/http';
 import { requireOwner } from '@/lib/session';
+import { ownsTrack } from '@/lib/services/library';
 
 // Metadata only. For user-imported files the bytes stay in the device's IndexedDB (storageKey "idb:<id>");
 // Postgres never holds audio. Nothing here fetches or stores Spotify audio.
@@ -27,8 +28,7 @@ export const POST = route(async (req) => {
   const owner = await requireOwner();
   const b = await body(req, create);
   if (b.trackId) {
-    const owned = await db.discoveryEvent.findFirst({ where: { ownerId: owner, trackId: b.trackId }, select: { id: true } });
-    if (!owned) throw NotFound('track.not_found', 'Track not found.');
+    if (!(await ownsTrack(db, owner, b.trackId))) throw NotFound('track.not_found', 'Track not found.');
   }
   const id = b.id ?? newId('aud');
   const row = await db.audioAsset.create({

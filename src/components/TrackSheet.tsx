@@ -7,12 +7,15 @@ import { hasLocalAudio, type PlayerTrack } from '@/lib/client/providers';
 import { artistLine, spotifyTrackUrl, type DiscoveryDTO } from '@/lib/client/types';
 import { useApp } from './AppProvider';
 import { IcBookmark, IcDownload, IcExternal, IcPlay } from './Icons';
+import { SpotifyEmbed } from './SpotifyEmbed';
 import { usePlayer } from './PlayerProvider';
 import { Artwork, Button, Sheet, clock, fmtBytes, fmtTime } from './ui';
 
 export const toPlayerTrack = (d: DiscoveryDTO): PlayerTrack => ({
   key: d.track.id, trackId: d.track.id, title: d.track.title, artist: artistLine(d.track), imageUrl: d.track.imageUrl, spotifyId: d.track.spotifyId,
 });
+
+const EXT_MIME: Record<string, string> = { mp3: 'audio/mpeg', m4a: 'audio/mp4', aac: 'audio/aac', flac: 'audio/flac', wav: 'audio/wav', ogg: 'audio/ogg', opus: 'audio/ogg' };
 
 async function sha256Hex(blob: Blob): Promise<string | undefined> {
   try {
@@ -24,15 +27,16 @@ async function sha256Hex(blob: Blob): Promise<string | undefined> {
 
 /** Stores a user-supplied audio file on this device and records its metadata server-side. */
 export async function importAudioFile(file: File, trackId: string | null, title: string): Promise<{ id: string; synced: boolean }> {
-  if (!file.type.startsWith('audio/')) throw new Error('Choose an audio file.');
+  const type = file.type.startsWith('audio/') ? file.type : (EXT_MIME[file.name.split('.').pop()?.toLowerCase() ?? ''] ?? '');
+  if (!type) throw new Error('Choose an audio file.');
   const probe = document.createElement('audio');
-  if (file.type && probe.canPlayType(file.type) === '') throw new Error(`This device cannot play ${file.type}.`);
+  if (probe.canPlayType(type) === '') throw new Error(`This device cannot play ${type}.`);
   const id = `aud_${crypto.randomUUID().replace(/-/g, '')}`;
   await requestPersistence();
-  const stored = await audio.put({ id, trackId, title, mimeType: file.type, sizeBytes: file.size, blob: file, addedAt: new Date().toISOString() });
+  const stored = await audio.put({ id, trackId, title, mimeType: type, sizeBytes: file.size, blob: file.type === type ? file : new Blob([file], { type }), addedAt: new Date().toISOString() });
   if (stored === null) throw new Error('Could not store the file. The device may be out of space.');
   try {
-    await api('/api/audio-assets', { method: 'POST', json: { id, trackId: trackId ?? undefined, title, mimeType: file.type, sizeBytes: file.size, sha256: await sha256Hex(file) } });
+    await api('/api/audio-assets', { method: 'POST', json: { id, trackId: trackId ?? undefined, title, mimeType: type, sizeBytes: file.size, sha256: await sha256Hex(file) } });
     return { id, synced: true };
   } catch (e) {
     if (e instanceof NetworkError || e instanceof ApiError) return { id, synced: false }; // file is usable locally either way
@@ -46,9 +50,11 @@ export function TrackSheet({ item, onClose }: { item: DiscoveryDTO | null; onClo
   const fileRef = useRef<HTMLInputElement>(null);
   const [local, setLocal] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
+  const [embed, setEmbed] = useState(false);
   const trackId = item?.track.id;
 
   useEffect(() => {
+    setEmbed(false);
     setLocal(null);
     if (trackId) void hasLocalAudio(trackId).then(setLocal);
   }, [trackId]);
@@ -68,7 +74,7 @@ export function TrackSheet({ item, onClose }: { item: DiscoveryDTO | null; onClo
     }
   }, [item, toast]);
 
-  if (!item) return <Sheet open={false} onClose={onClose} label="Track" children={null} />;
+  if (!item) return null;
   const t = item.track;
   const o = overrides[t.id];
   const heard = o?.heard ?? item.heard;
@@ -103,13 +109,20 @@ export function TrackSheet({ item, onClose }: { item: DiscoveryDTO | null; onClo
           </Button>
         ) : (
           <p className="meta" style={{ margin: 0, lineHeight: 1.45 }}>
-            {local === null ? ' ' : 'LIGHTOO has this track’s details only. To play it here, add an audio file you own.'}
+            {local === null ? ' ' : 'Offline playback needs an audio file you own. Without one, play it through Spotify’s player below.'}
           </p>
         )}
+        {embed ? (
+          <SpotifyEmbed kind="track" id={t.spotifyId} title={t.title} />
+        ) : (
+          <Button variant={local ? 'secondary' : 'primary'} onClick={() => setEmbed(true)}>
+            <IcPlay size={20} /> Play with Spotify
+          </Button>
+        )}
         <a
-          className={`btn ${local ? 'secondary' : 'primary'} block`}
+          className="btn secondary block"
           href={spotifyTrackUrl(t.spotifyId)} target="_blank" rel="noopener noreferrer"
-          aria-disabled={!online} style={!online ? { opacity: 0.4, pointerEvents: 'none', color: 'inherit' } : local ? { color: 'var(--text)' } : { color: 'var(--accent-ink)' }}
+          aria-disabled={!online} style={{ color: 'var(--text)', ...(online ? {} : { opacity: 0.4, pointerEvents: 'none' }) }}
           onClick={() => !heard && setTimeout(() => toast('Back from Spotify?', { label: 'Mark listened', run: () => void setTrackState(t.id, { heard: true }) }), 600)}
         >
           Open in Spotify <IcExternal size={20} />

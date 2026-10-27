@@ -35,6 +35,8 @@ export type PlaylistDTO = {
   ownerName: string | null;
   imageUrl: string | null;
   trackCount: number;
+  source: 'SPOTIFY_API' | 'IMPORT';
+  embedId: string | null;
   monitoring: boolean;
   syncStatus: SyncStatus;
   syncError: string | null;

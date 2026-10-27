@@ -2,7 +2,7 @@ import type { Db } from '../db';
 import type { Clock } from '../clock';
 import { AppError } from '../errors';
 import { newId } from '../ids';
-import { SpotifyAccessError, type SpotifyApi } from '../spotify/client';
+import { SpotifyAccessError, type SpotifyApi, type SpotifyTrack } from '../spotify/client';
 import { dedupeKey, dedupeTracks, planSync } from './plan';
 
 export type SyncSummary = {
@@ -16,6 +16,113 @@ export type SyncSummary = {
 };
 
 const MAX_ERR = 200;
+
+export type SnapshotMeta = { name: string; ownerName: string | null; imageUrl: string | null; snapshotId: string | null };
+
+/**
+ * Diff a playlist's current tracks against what is stored and apply the result in ONE transaction.
+ * Shared by live Spotify sync and file import, so both get the same baseline, dedupe and
+ * history-preservation behaviour. Throws if the transaction fails; nothing is half-written.
+ */
+export async function applySnapshot(
+  deps: { db: Db; clock: Clock },
+  ownerId: string,
+  pl: { id: string; baselineDone: boolean; seedRecent: boolean },
+  meta: SnapshotMeta,
+  tracks: SpotifyTrack[],
+): Promise<{ announced: number; removed: number }> {
+  const { db, clock } = deps;
+  const fetched = dedupeTracks(tracks);
+  const existing = await db.playlistTrack.findMany({
+    where: { playlistId: pl.id },
+    select: { removedAt: true, track: { select: { spotifyId: true } } },
+  });
+  const plan = planSync({
+    baselineDone: pl.baselineDone,
+    seedRecent: pl.seedRecent,
+    existing: existing.map((e) => ({ spotifyId: e.track.spotifyId, removedAt: e.removedAt })),
+    fetched,
+  });
+
+  const now = clock.now();
+  await db.$transaction(
+    async (tx) => {
+      const needed = [...new Set(plan.add.map((a) => a.track.spotifyId))];
+      if (needed.length) {
+        await tx.track.createMany({
+          skipDuplicates: true,
+          data: plan.add.map(({ track: t }) => ({
+            id: newId('trk'),
+            spotifyId: t.spotifyId,
+            title: t.title,
+            artists: t.artists,
+            artistNames: t.artists.map((a) => a.name).join(', '),
+            albumName: t.albumName,
+            imageUrl: t.imageUrl,
+            durationMs: t.durationMs,
+            isrc: t.isrc,
+            isPlayable: t.isPlayable,
+          })),
+        });
+        const rows = await tx.track.findMany({ where: { spotifyId: { in: needed } }, select: { id: true, spotifyId: true } });
+        const idBySpotify = new Map(rows.map((r) => [r.spotifyId, r.id]));
+
+        await tx.playlistTrack.createMany({
+          skipDuplicates: true,
+          data: plan.add.map(({ track: t }) => ({
+            id: newId('plt'),
+            playlistId: pl.id,
+            trackId: idBySpotify.get(t.spotifyId)!,
+            position: t.position,
+            addedAtSource: t.addedAt,
+            firstSeenAt: now,
+            lastSeenAt: now,
+          })),
+        });
+
+        const events = plan.add.filter((a) => a.event);
+        if (events.length) {
+          await tx.discoveryEvent.createMany({
+            skipDuplicates: true, // unique(ownerId, dedupeKey)
+            data: events.map(({ track: t, event }) => ({
+              id: newId('dsc'),
+              ownerId,
+              playlistId: pl.id,
+              trackId: idBySpotify.get(t.spotifyId)!,
+              type: event!,
+              detectedAt: now,
+              dedupeKey: dedupeKey(pl.id, t.spotifyId),
+              playlistName: meta.name,
+              snapshotId: meta.snapshotId,
+            })),
+          });
+        }
+      }
+      if (plan.restore.length) {
+        await tx.playlistTrack.updateMany({
+          where: { playlistId: pl.id, track: { spotifyId: { in: plan.restore } } },
+          data: { removedAt: null, lastSeenAt: now },
+        });
+      }
+      if (plan.keep.length) {
+        await tx.playlistTrack.updateMany({ where: { playlistId: pl.id, track: { spotifyId: { in: plan.keep } } }, data: { lastSeenAt: now } });
+      }
+      if (plan.remove.length) {
+        // Never delete: discoveries and rows stay so History can show "removed from playlist".
+        await tx.playlistTrack.updateMany({
+          where: { playlistId: pl.id, track: { spotifyId: { in: plan.remove } } },
+          data: { removedAt: now },
+        });
+      }
+      await tx.monitoredPlaylist.update({
+        where: { id: pl.id },
+        data: { baselineDone: true, snapshotId: meta.snapshotId, name: meta.name, imageUrl: meta.imageUrl, ownerName: meta.ownerName, trackCount: fetched.length },
+      });
+    },
+    { timeout: 25_000 },
+  );
+  return { announced: plan.add.filter((a) => a.event).length, removed: plan.remove.length };
+}
 
 /**
  * Sync one playlist. Order matters for correctness:
@@ -35,6 +142,7 @@ export async function syncPlaylist(
   const { db, api, clock } = deps;
   const pl = await db.monitoredPlaylist.findFirst({ where: { id: playlistId, ownerId } });
   if (!pl) throw new AppError('not_found', 'playlist.not_found', 'Playlist not found.');
+  if (pl.source === 'IMPORT') throw new AppError('validation', 'playlist.import_source', 'Imported playlists are refreshed by importing a newer export.');
 
   const started = clock.now();
   const run = await db.syncRun.create({ data: { id: newId('syn'), playlistId: pl.id, startedAt: started } });
@@ -61,99 +169,10 @@ export async function syncPlaylist(
       );
     }
 
-    const fetched = dedupeTracks(await api.playlistTracks(pl.spotifyPlaylistId));
-    const existing = await db.playlistTrack.findMany({
-      where: { playlistId: pl.id },
-      select: { removedAt: true, track: { select: { spotifyId: true } } },
-    });
-    const plan = planSync({
-      baselineDone: pl.baselineDone,
-      seedRecent: pl.seedRecent,
-      existing: existing.map((e) => ({ spotifyId: e.track.spotifyId, removedAt: e.removedAt })),
-      fetched,
-    });
+    const { announced, removed } = await applySnapshot(deps, ownerId, pl, meta, await api.playlistTracks(pl.spotifyPlaylistId));
 
-    const now = clock.now();
-    await db.$transaction(
-      async (tx) => {
-        const needed = [...new Set(plan.add.map((a) => a.track.spotifyId))];
-        if (needed.length) {
-          await tx.track.createMany({
-            skipDuplicates: true,
-            data: plan.add.map(({ track: t }) => ({
-              id: newId('trk'),
-              spotifyId: t.spotifyId,
-              title: t.title,
-              artists: t.artists,
-              artistNames: t.artists.map((a) => a.name).join(', '),
-              albumName: t.albumName,
-              imageUrl: t.imageUrl,
-              durationMs: t.durationMs,
-              isrc: t.isrc,
-              isPlayable: t.isPlayable,
-            })),
-          });
-          const rows = await tx.track.findMany({ where: { spotifyId: { in: needed } }, select: { id: true, spotifyId: true } });
-          const idBySpotify = new Map(rows.map((r) => [r.spotifyId, r.id]));
-
-          await tx.playlistTrack.createMany({
-            skipDuplicates: true,
-            data: plan.add.map(({ track: t }) => ({
-              id: newId('plt'),
-              playlistId: pl.id,
-              trackId: idBySpotify.get(t.spotifyId)!,
-              position: t.position,
-              addedAtSource: t.addedAt,
-              firstSeenAt: now,
-              lastSeenAt: now,
-            })),
-          });
-
-          const events = plan.add.filter((a) => a.event);
-          if (events.length) {
-            await tx.discoveryEvent.createMany({
-              skipDuplicates: true, // unique(ownerId, dedupeKey)
-              data: events.map(({ track: t, event }) => ({
-                id: newId('dsc'),
-                ownerId,
-                playlistId: pl.id,
-                trackId: idBySpotify.get(t.spotifyId)!,
-                type: event!,
-                detectedAt: now,
-                dedupeKey: dedupeKey(pl.id, t.spotifyId),
-                playlistName: meta.name,
-                snapshotId: meta.snapshotId,
-              })),
-            });
-          }
-        }
-        if (plan.restore.length) {
-          await tx.playlistTrack.updateMany({
-            where: { playlistId: pl.id, track: { spotifyId: { in: plan.restore } } },
-            data: { removedAt: null, lastSeenAt: now },
-          });
-        }
-        if (plan.keep.length) {
-          await tx.playlistTrack.updateMany({ where: { playlistId: pl.id, track: { spotifyId: { in: plan.keep } } }, data: { lastSeenAt: now } });
-        }
-        if (plan.remove.length) {
-          // Never delete: discoveries and rows stay so History can show "removed from playlist".
-          await tx.playlistTrack.updateMany({
-            where: { playlistId: pl.id, track: { spotifyId: { in: plan.remove } } },
-            data: { removedAt: now },
-          });
-        }
-        await tx.monitoredPlaylist.update({
-          where: { id: pl.id },
-          data: { baselineDone: true, snapshotId: meta.snapshotId, name: meta.name, imageUrl: meta.imageUrl, ownerName: meta.ownerName, trackCount: fetched.length },
-        });
-      },
-      { timeout: 25_000 },
-    );
-
-    const announced = plan.add.filter((a) => a.event).length;
     return await finish(
-      { outcome: announced || plan.remove.length ? 'SUCCESS' : 'NO_CHANGES', newTracks: announced, removedTracks: plan.remove.length },
+      { outcome: announced || removed ? 'SUCCESS' : 'NO_CHANGES', newTracks: announced, removedTracks: removed },
       { lastSyncedAt: clock.now(), syncStatus: 'OK', syncError: null },
     );
   } catch (e) {
@@ -190,7 +209,7 @@ export async function syncAll(
   const { budgetMs = 45_000 } = opts;
   const t0 = deps.clock.now().getTime();
   const lists = await deps.db.monitoredPlaylist.findMany({
-    where: { ownerId, monitoring: true },
+    where: { ownerId, monitoring: true, source: 'SPOTIFY_API' },
     orderBy: [{ lastSyncedAt: { sort: 'asc', nulls: 'first' } }],
     select: { id: true },
   });

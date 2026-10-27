@@ -25,15 +25,15 @@ export function decrypt(blob: string, rawKey?: string): string {
   return Buffer.concat([d.update(b.subarray(28)), d.final()]).toString('utf8');
 }
 
-/** Password hash format: scrypt$<salt b64url>$<hash b64url>. */
+/** Password hash format: scrypt:<salt b64url>:<hash b64url>. ':' (not '$') so .env loaders never expand it. */
 export async function hashPassword(pw: string): Promise<string> {
   const salt = randomBytes(16);
   const h = await scrypt(pw, salt, 64);
-  return `scrypt$${salt.toString('base64url')}$${h.toString('base64url')}`;
+  return `scrypt:${salt.toString('base64url')}:${h.toString('base64url')}`;
 }
 
 export async function verifyPassword(pw: string, stored: string): Promise<boolean> {
-  const [alg, s, h] = stored.split('$');
+  const [alg, s, h] = stored.split(':');
   if (alg !== 'scrypt' || !s || !h) return false;
   const expected = Buffer.from(h, 'base64url');
   const actual = await scrypt(pw, Buffer.from(s, 'base64url'), expected.length);

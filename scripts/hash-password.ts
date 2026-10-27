@@ -5,5 +5,5 @@ if (!pw) {
   console.error('Usage: npx tsx scripts/hash-password.ts "your password"');
   process.exit(1);
 }
-// Prints a value for OWNER_PASSWORD_HASH. In .env files escape $ as \$ if your loader expands variables.
-console.log(await hashPassword(pw));
+// Prints a value for OWNER_PASSWORD_HASH.
+hashPassword(pw).then((h) => console.log(h));

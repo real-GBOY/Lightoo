@@ -11,11 +11,14 @@ export function Wordmark({ size = 28 }: { size?: number }) {
   );
 }
 
-export function Artwork({ src, name, size, radius }: { src?: string | null; name?: string; size: number; radius?: number }) {
+export function Artwork({ src, name, size, radius }: { src?: string | null; name?: string; size: number | 'fill'; radius?: number }) {
   const [bad, setBad] = useState(false);
-  const r = radius ?? (size <= 56 ? 6 : size <= 124 ? 10 : 12);
+  const px = size === 'fill' ? 160 : size;
+  const r = radius ?? (px <= 56 ? 6 : px <= 124 ? 10 : 12);
+  const box = size === 'fill' ? { width: '100%', aspectRatio: '1' } : { width: size, height: size };
   return (
-    <div className="art" style={{ width: size, height: size, borderRadius: r, fontSize: size / 2.4 }} aria-hidden="true">
+    <div className="art" style={{ ...box, borderRadius: r, fontSize: px / 2.4 }} aria-hidden="true">
+      {/* eslint-disable-next-line @next/next/no-img-element -- remote Spotify CDN covers; no optimizer so nothing is proxied or tinted */}
       {src && !bad ? <img src={src} alt="" loading="lazy" onError={() => setBad(true)} /> : (name?.trim()[0] ?? '♪').toUpperCase()}
     </div>
   );
